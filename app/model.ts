@@ -140,6 +140,23 @@ export type AiAnalysisItem = {
   recommendation: string;
   reusableFor: string[];
   confidence: number;
+  evaluation?: "effective" | "partially_effective" | "neutral" | "weakens" | "unclear";
+  evidence?: string;
+};
+
+export type AiRequirementMatch = {
+  requirement: string;
+  priority: "core" | "important" | "secondary";
+  status: "covered" | "partial" | "missing" | "unknown";
+  evidence: string[];
+  reason: string;
+};
+
+export type AiActionItem = {
+  priority: "high" | "medium" | "low";
+  type: "revise" | "do_not_force";
+  action: string;
+  rationale: string;
 };
 
 export type AiAnalysis = {
@@ -148,6 +165,16 @@ export type AiAnalysis = {
   jobId: string;
   items: AiAnalysisItem[];
   importedAt: string;
+  analysisVersion?: 2;
+  overallMatch?: {
+    scoreMin: number;
+    scoreMax: number;
+    evidenceSufficiency: "high" | "medium" | "low";
+    summary: string;
+    reasons: string[];
+  };
+  requirements?: AiRequirementMatch[];
+  actions?: AiActionItem[];
 };
 
 export type Workspace = {

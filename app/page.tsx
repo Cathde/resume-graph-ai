@@ -22,7 +22,7 @@ import {
   structureResumeText,
   uid,
 } from "./model";
-import type { AiAnalysisItem, AlignmentRow, DiffItem, DiffKind, DiffReport, Job, JobStatus, ResumeNode, ReviewItem, StructuredSection, Workspace } from "./model";
+import type { AiAnalysis, AiAnalysisItem, AlignmentRow, DiffItem, DiffKind, DiffReport, Job, JobStatus, ResumeNode, ReviewItem, StructuredSection, Workspace } from "./model";
 import { clearAllData, deleteFile, exportBackup, getFile, importBackup, loadWorkspace, saveFile, saveWorkspace } from "./storage";
 
 type View = "jobs" | "resumes" | "graph";
@@ -39,6 +39,7 @@ type UploadDraft = {
 };
 
 const DIFF_LABELS: Record<DiffKind, string> = { reordered: "调序", modified: "改写", removed: "删除", added: "新增" };
+const AI_EVALUATION = { effective: "有效", partially_effective: "部分有效", neutral: "影响有限", weakens: "可能削弱", unclear: "无法判断" } as const;
 const DIFF_GROUPS: Array<{ kind: DiffKind; description: string }> = [
   { kind: "reordered", description: "栏目内部的经历或成果顺序发生变化" },
   { kind: "modified", description: "系统较有把握地识别为同一内容的改写" },
@@ -142,11 +143,17 @@ export default function Home() {
       return;
     }
     const exists = workspace.jobs.some((item) => item.id === jobEditor.id);
-    update((current) => ({ ...current, jobs: exists ? current.jobs.map((item) => item.id === jobEditor.id ? { ...jobEditor, updatedAt: new Date().toISOString() } : item) : [...current.jobs, jobEditor] }));
+    const previous = workspace.jobs.find((item) => item.id === jobEditor.id);
+    const jdChanged = Boolean(previous && previous.jdText !== jobEditor.jdText);
+    update((current) => ({
+      ...current,
+      jobs: exists ? current.jobs.map((item) => item.id === jobEditor.id ? { ...jobEditor, updatedAt: new Date().toISOString() } : item) : [...current.jobs, jobEditor],
+      aiAnalyses: jdChanged ? current.aiAnalyses.filter((item) => item.jobId !== jobEditor.id) : current.aiAnalyses,
+    }));
     setSelectedJobId(jobEditor.id);
     setJobEditor(null);
     setView("jobs");
-    notify(exists ? "岗位已更新" : "岗位已保存");
+    notify(exists ? (jdChanged ? "岗位已更新；旧 AI 分析因 JD 变化已移除" : "岗位已更新") : "岗位已保存");
   };
 
   const selectUpload = () => {
@@ -261,22 +268,17 @@ export default function Home() {
     const childBlocks = structureResumeText(resume.extractedText);
     const next = { ...compareResumeBlocks(parentBlocks, childBlocks, jdText), parentResumeId: parent.id, childResumeId: resume.id };
     const reconciled = reconcileDiffReport(previous, next);
-    const lostAiCount = workspace.aiAnalyses
-      .filter((analysis) => analysis.resumeId === resume.id)
-      .flatMap((analysis) => analysis.items)
-      .filter((item) => !reconciled.matchedIds.has(item.diffItemId)).length;
+    const lostAiCount = workspace.aiAnalyses.filter((analysis) => analysis.resumeId === resume.id).length;
     const effects = [
       reconciled.lostNoteCount ? `${reconciled.lostNoteCount} 条旧备注无法迁移` : "旧备注均可迁移或没有旧备注",
-      lostAiCount ? `${lostAiCount} 条 AI 分析将移除` : "现有 AI 分析均可保留或尚未生成",
+      lostAiCount ? `${lostAiCount} 份岗位分析将移除并需要重新生成` : "尚未生成 AI 分析",
     ].join("；");
     if (!window.confirm(`将使用新版规则重新识别这份简历。${effects}。确认覆盖旧差异报告吗？`)) return;
     update((current) => ({
       ...current,
       resumes: current.resumes.map((item) => item.id === parent.id ? { ...item, blocks: parentBlocks } : item.id === resume.id ? { ...item, blocks: childBlocks } : item),
       diffs: current.diffs.map((report) => report.childResumeId === resume.id ? reconciled.report : report),
-      aiAnalyses: current.aiAnalyses.map((analysis) => analysis.resumeId !== resume.id ? analysis : ({
-        ...analysis, items: analysis.items.filter((item) => reconciled.matchedIds.has(item.diffItemId)),
-      })).filter((analysis) => analysis.resumeId !== resume.id || analysis.items.length > 0),
+      aiAnalyses: current.aiAnalyses.filter((analysis) => analysis.resumeId !== resume.id),
     }));
     notify("已使用新版规则重新识别");
   };
@@ -284,19 +286,19 @@ export default function Home() {
   const resolveReview = (reviewId: string, resolution: "modified" | "split") => {
     if (!selectedResume || !selectedDiff) return;
     const jdText = linkedJobs(workspace, selectedResume.id).map((job) => job.jdText).join("\n");
-    update((current) => ({ ...current, diffs: current.diffs.map((report) => report.childResumeId === selectedResume.id ? resolveReviewItem(report, reviewId, resolution, jdText) : report) }));
-    notify(resolution === "modified" ? "已确认为改写" : "已拆分为删除和新增");
+    update((current) => ({ ...current, diffs: current.diffs.map((report) => report.childResumeId === selectedResume.id ? resolveReviewItem(report, reviewId, resolution, jdText) : report), aiAnalyses: current.aiAnalyses.filter((analysis) => analysis.resumeId !== selectedResume.id) }));
+    notify(`${resolution === "modified" ? "已确认为改写" : "已拆分为删除和新增"}；相关岗位分析需要重新生成`);
   };
 
   const mergeChanges = (firstId: string, secondId: string) => {
     if (!selectedResume || !selectedDiff) return;
-    const affected = workspace.aiAnalyses.filter((analysis) => analysis.resumeId === selectedResume.id).flatMap((analysis) => analysis.items).filter((item) => item.diffItemId === firstId || item.diffItemId === secondId).length;
-    if (!window.confirm(`将这两项合并为一条“用户确认”的改写。${affected ? `${affected} 条相关 AI 分析将移除。` : "没有相关 AI 分析。"}确认继续吗？`)) return;
+    const affected = workspace.aiAnalyses.filter((analysis) => analysis.resumeId === selectedResume.id).length;
+    if (!window.confirm(`将这两项合并为一条“用户确认”的改写。${affected ? `${affected} 份相关岗位分析将移除并需要重新生成。` : "没有相关 AI 分析。"}确认继续吗？`)) return;
     const jdText = linkedJobs(workspace, selectedResume.id).map((job) => job.jdText).join("\n");
     update((current) => ({
       ...current,
       diffs: current.diffs.map((report) => report.childResumeId === selectedResume.id ? mergeDiffItems(report, firstId, secondId, jdText) : report),
-      aiAnalyses: current.aiAnalyses.map((analysis) => analysis.resumeId !== selectedResume.id ? analysis : ({ ...analysis, items: analysis.items.filter((item) => item.diffItemId !== firstId && item.diffItemId !== secondId) })).filter((analysis) => analysis.resumeId !== selectedResume.id || analysis.items.length > 0),
+      aiAnalyses: current.aiAnalyses.filter((analysis) => analysis.resumeId !== selectedResume.id),
     }));
     notify("已合并为用户确认的改写");
   };
@@ -356,7 +358,7 @@ export default function Home() {
     });
     const data = await response.json() as { content?: string; error?: string; usage?: { total_tokens?: number } };
     if (!response.ok || !data.content) throw new Error(data.error || "DeepSeek 请求失败");
-    return data;
+    return { content: data.content, usage: data.usage };
   };
 
   const testAiConnection = async () => {
@@ -384,8 +386,8 @@ export default function Home() {
     try {
       const prompt = buildDeepSeekPrompt(parent, resume, report, job, aiSettings.anonymize);
       const result = await requestDeepSeek(aiSettings, "analyze", prompt);
-      const items = parseDeepSeekAnalysis(result.content, report);
-      update((current) => ({ ...current, aiAnalyses: [...current.aiAnalyses.filter((item) => !(item.resumeId === resume.id && item.jobId === job.id)), { id: uid("ai"), resumeId: resume.id, jobId: job.id, items, importedAt: new Date().toISOString() }] }));
+      const analysis = parseDeepSeekAnalysis(result.content, report);
+      update((current) => ({ ...current, aiAnalyses: [...current.aiAnalyses.filter((item) => !(item.resumeId === resume.id && item.jobId === job.id)), { id: uid("ai"), resumeId: resume.id, jobId: job.id, analysisVersion: 2, ...analysis, importedAt: new Date().toISOString() }] }));
       setSelectedResumeId(resume.id);
       setSelectedJobId(job.id);
       notify(`DeepSeek 分析已保存${result.usage?.total_tokens ? ` · ${result.usage.total_tokens} tokens` : ""}`);
@@ -449,8 +451,8 @@ export default function Home() {
 
       <section className="privacy-strip"><span>本地资料库</span> 原始文件与识别结果只存当前浏览器；仅在你主动分析时向 DeepSeek 发送必要文本。</section>
 
-      {view === "jobs" && <JobWorkspace workspace={workspace} counts={counts} selectedJob={selectedJob} onSelect={setSelectedJobId} onCreate={startJob} onEdit={setJobEditor} onUpdate={(job) => update((current) => ({ ...current, jobs: current.jobs.map((item) => item.id === job.id ? job : item) }))} onDelete={(job) => { if (window.confirm(`永久删除岗位「${job.company}｜${job.role}」及其关联记录？`)) { update((current) => ({ ...current, jobs: current.jobs.filter((item) => item.id !== job.id), links: current.links.filter((item) => item.jobId !== job.id), aiAnalyses: current.aiAnalyses.filter((item) => item.jobId !== job.id) })); setSelectedJobId(null); } }} onOpenResume={(id) => { setSelectedResumeId(id); setView("resumes"); }} onSubmitted={setSubmitted} onUnlink={unlinkResume} onLink={linkExistingResume} onAnalyze={analyzeWithAi} aiBusyKey={aiBusyKey} />}
-      {view === "resumes" && <ResumeLibrary workspace={workspace} selectedResume={selectedResume} onSelect={setSelectedResumeId} onUpload={selectUpload} onDownload={downloadResume} onDelete={deleteResume} onReparent={reparentResume} onReanalyze={reanalyzeResume} onMergeChanges={mergeChanges} onUpdateDiff={(item) => update((current) => ({ ...current, diffs: current.diffs.map((report) => report.childResumeId === selectedResume?.id ? { ...report, items: report.items.map((entry) => entry.id === item.id ? item : entry) } : report) }))} onUpdateReview={updateReview} onResolveReview={resolveReview} onOpenJob={(id) => { setSelectedJobId(id); setView("jobs"); }} />}
+      {view === "jobs" && <JobWorkspace workspace={workspace} counts={counts} selectedJob={selectedJob} onSelect={setSelectedJobId} onCreate={startJob} onEdit={setJobEditor} onUpdate={(job) => update((current) => ({ ...current, jobs: current.jobs.map((item) => item.id === job.id ? job : item) }))} onDelete={(job) => { if (window.confirm(`永久删除岗位「${job.company}｜${job.role}」及其关联记录？`)) { update((current) => ({ ...current, jobs: current.jobs.filter((item) => item.id !== job.id), links: current.links.filter((item) => item.jobId !== job.id), aiAnalyses: current.aiAnalyses.filter((item) => item.jobId !== job.id) })); setSelectedJobId(null); } }} onOpenResume={(id) => { setSelectedResumeId(id); setView("resumes"); }} onSubmitted={setSubmitted} onUnlink={unlinkResume} onLink={linkExistingResume} />}
+      {view === "resumes" && <ResumeLibrary workspace={workspace} selectedResume={selectedResume} selectedJobId={selectedJobId} onSelectJob={setSelectedJobId} onSelect={setSelectedResumeId} onUpload={selectUpload} onDownload={downloadResume} onDelete={deleteResume} onReparent={reparentResume} onReanalyze={reanalyzeResume} onMergeChanges={mergeChanges} onUpdateDiff={(item) => update((current) => ({ ...current, diffs: current.diffs.map((report) => report.childResumeId === selectedResume?.id ? { ...report, items: report.items.map((entry) => entry.id === item.id ? item : entry) } : report) }))} onUpdateReview={updateReview} onResolveReview={resolveReview} onOpenJob={(id) => { setSelectedJobId(id); setView("jobs"); }} onAnalyze={analyzeWithAi} aiBusyKey={aiBusyKey} />}
       {view === "graph" && <GraphView workspace={workspace} selectedId={selectedResumeId} onSelect={setSelectedResumeId} onOpen={(id) => { setSelectedResumeId(id); setView("resumes"); }} onUpload={selectUpload} />}
 
       <footer className="footer"><span>Resume Graph AI · 本地优先的个人求职资料库</span><div><button onClick={() => backupInputRef.current?.click()}>导入完整备份</button><button className="danger-text" onClick={deleteAll}>清空全部数据</button></div></footer>
@@ -463,8 +465,8 @@ export default function Home() {
   );
 }
 
-function JobWorkspace({ workspace, counts, selectedJob, onSelect, onCreate, onEdit, onUpdate, onDelete, onOpenResume, onSubmitted, onUnlink, onLink, onAnalyze, aiBusyKey }: {
-  workspace: Workspace; counts: { active: number; submitted: number; changes: number }; selectedJob: Job | null; onSelect: (id: string) => void; onCreate: () => void; onEdit: (job: Job) => void; onUpdate: (job: Job) => void; onDelete: (job: Job) => void; onOpenResume: (id: string) => void; onSubmitted: (jobId: string, resumeId: string) => void; onUnlink: (jobId: string, resumeId: string) => void; onLink: (jobId: string, resumeId: string) => void; onAnalyze: (resume: ResumeNode, job: Job) => void; aiBusyKey: string;
+function JobWorkspace({ workspace, counts, selectedJob, onSelect, onCreate, onEdit, onUpdate, onDelete, onOpenResume, onSubmitted, onUnlink, onLink }: {
+  workspace: Workspace; counts: { active: number; submitted: number; changes: number }; selectedJob: Job | null; onSelect: (id: string) => void; onCreate: () => void; onEdit: (job: Job) => void; onUpdate: (job: Job) => void; onDelete: (job: Job) => void; onOpenResume: (id: string) => void; onSubmitted: (jobId: string, resumeId: string) => void; onUnlink: (jobId: string, resumeId: string) => void; onLink: (jobId: string, resumeId: string) => void;
 }) {
   const links = selectedJob ? workspace.links.filter((item) => item.jobId === selectedJob.id) : [];
   return <div className="page-shell">
@@ -475,7 +477,7 @@ function JobWorkspace({ workspace, counts, selectedJob, onSelect, onCreate, onEd
       <section className="detail-panel">{selectedJob ? <>
         <div className="detail-header"><div><span className="status-chip">{selectedJob.status}</span><h2>{selectedJob.company}｜{selectedJob.role}</h2><p>{selectedJob.nextAction || "尚未设置下一步行动"}</p></div><div className="button-row"><button onClick={() => onEdit({ ...selectedJob })}>编辑岗位</button><button className="danger-text" onClick={() => onDelete(selectedJob)}>删除</button></div></div>
         <div className="job-facts"><label>阶段<select value={selectedJob.status} onChange={(event) => onUpdate({ ...selectedJob, status: event.target.value as JobStatus, updatedAt: new Date().toISOString() })}>{JOB_STATUSES.map((status) => <option key={status}>{status}</option>)}</select></label><span><small>截止时间</small>{selectedJob.deadline || "未设置"}</span><span><small>最近更新</small>{formatDate(selectedJob.updatedAt)}</span></div>
-        <div className="detail-section"><div className="section-heading"><h3>关联简历</h3><span>同一版本可以用于多个相似岗位</span></div>{workspace.resumes.length > 0 && <label className="link-picker">关联已有简历<select defaultValue="" onChange={(event) => { onLink(selectedJob.id, event.target.value); event.currentTarget.value = ""; }}><option value="">请选择…</option>{workspace.resumes.filter((resume) => !links.some((link) => link.resumeId === resume.id)).map((resume) => <option key={resume.id} value={resume.id}>{resume.name}</option>)}</select></label>}{links.length === 0 ? <p className="quiet-box">尚未关联简历。可以选择已有版本，或上传新简历时关联这个岗位。</p> : links.map((link) => { const resume = workspace.resumes.find((item) => item.id === link.resumeId); if (!resume) return null; const diff = getDiffForResume(workspace, resume.id); const busy = aiBusyKey === `${resume.id}:${selectedJob.id}`; return <div className="linked-resume" key={link.id}><button className="resume-link-main" onClick={() => onOpenResume(resume.id)}><strong>{resume.name}</strong><span>{resume.fileType.toUpperCase()} · {diff?.items.length ?? 0} 处改动</span></button><div>{link.isSubmitted ? <span className="submitted">实际投递版本</span> : <button onClick={() => onSubmitted(selectedJob.id, resume.id)}>标记为已投递</button>}<button className="ai-analyze-button" onClick={() => onAnalyze(resume, selectedJob)} disabled={!resume.parentId || busy}>{busy ? "分析中…" : "DeepSeek 分析"}</button><button className="danger-text" onClick={() => onUnlink(selectedJob.id, resume.id)}>解除关联</button></div></div>; })}</div>
+        <div className="detail-section"><div className="section-heading"><h3>关联简历</h3><span>同一版本可以用于多个相似岗位</span></div>{workspace.resumes.length > 0 && <label className="link-picker">关联已有简历<select defaultValue="" onChange={(event) => { onLink(selectedJob.id, event.target.value); event.currentTarget.value = ""; }}><option value="">请选择…</option>{workspace.resumes.filter((resume) => !links.some((link) => link.resumeId === resume.id)).map((resume) => <option key={resume.id} value={resume.id}>{resume.name}</option>)}</select></label>}{links.length === 0 ? <p className="quiet-box">尚未关联简历。可以选择已有版本，或上传新简历时关联这个岗位。</p> : links.map((link) => { const resume = workspace.resumes.find((item) => item.id === link.resumeId); if (!resume) return null; const diff = getDiffForResume(workspace, resume.id); const analyzed = workspace.aiAnalyses.some((item) => item.resumeId === resume.id && item.jobId === selectedJob.id); return <div className="linked-resume" key={link.id}><button className="resume-link-main" onClick={() => onOpenResume(resume.id)}><strong>{resume.name}</strong><span>{resume.fileType.toUpperCase()} · {diff?.items.length ?? 0} 处改动</span></button><div>{link.isSubmitted ? <span className="submitted">实际投递版本</span> : <button onClick={() => onSubmitted(selectedJob.id, resume.id)}>标记为已投递</button>}<button onClick={() => onOpenResume(resume.id)} disabled={!resume.parentId}>{analyzed ? "查看分析" : "前往变化清单"}</button><button className="danger-text" onClick={() => onUnlink(selectedJob.id, resume.id)}>解除关联</button></div></div>; })}</div>
         <div className="detail-section"><div className="section-heading"><h3>JD 快照</h3>{/^https?:\/\//.test(selectedJob.sourceUrl) && <a href={selectedJob.sourceUrl} target="_blank" rel="noreferrer">打开来源 ↗</a>}</div><pre className="jd-view">{selectedJob.jdText || "尚未填写 JD 正文。"}</pre></div>
         {selectedJob.notes && <div className="detail-section"><h3>备注</h3><p className="notes-view">{selectedJob.notes}</p></div>}
       </> : <div className="detail-placeholder">选择一个岗位查看详情</div>}</section>
@@ -483,18 +485,24 @@ function JobWorkspace({ workspace, counts, selectedJob, onSelect, onCreate, onEd
   </div>;
 }
 
-function ResumeLibrary({ workspace, selectedResume, onSelect, onUpload, onDownload, onDelete, onReparent, onReanalyze, onMergeChanges, onUpdateDiff, onUpdateReview, onResolveReview, onOpenJob }: { workspace: Workspace; selectedResume: ResumeNode | null; onSelect: (id: string) => void; onUpload: () => void; onDownload: (resume: ResumeNode) => void; onDelete: (resume: ResumeNode) => void; onReparent: (resume: ResumeNode, parentId: string | null) => void; onReanalyze: (resume: ResumeNode) => void; onMergeChanges: (firstId: string, secondId: string) => void; onUpdateDiff: (item: DiffItem) => void; onUpdateReview: (item: ReviewItem) => void; onResolveReview: (id: string, resolution: "modified" | "split") => void; onOpenJob: (id: string) => void }) {
+function ResumeLibrary({ workspace, selectedResume, selectedJobId, onSelectJob, onSelect, onUpload, onDownload, onDelete, onReparent, onReanalyze, onMergeChanges, onUpdateDiff, onUpdateReview, onResolveReview, onOpenJob, onAnalyze, aiBusyKey }: { workspace: Workspace; selectedResume: ResumeNode | null; selectedJobId: string | null; onSelectJob: (id: string | null) => void; onSelect: (id: string) => void; onUpload: () => void; onDownload: (resume: ResumeNode) => void; onDelete: (resume: ResumeNode) => void; onReparent: (resume: ResumeNode, parentId: string | null) => void; onReanalyze: (resume: ResumeNode) => void; onMergeChanges: (firstId: string, secondId: string) => void; onUpdateDiff: (item: DiffItem) => void; onUpdateReview: (item: ReviewItem) => void; onResolveReview: (id: string, resolution: "modified" | "split") => void; onOpenJob: (id: string) => void; onAnalyze: (resume: ResumeNode, job: Job) => void; aiBusyKey: string }) {
   const [parentVisible, setParentVisible] = useState(false);
-  const [listOpen, setListOpen] = useState(false);
+  const [detailTab, setDetailTab] = useState<"changes" | "comparison">("changes");
   const [versionListVisible, setVersionListVisible] = useState(true);
   const [focusedChange, setFocusedChange] = useState<string | null>(null);
   const report = selectedResume ? getDiffForResume(workspace, selectedResume.id) : null;
   const jobs = selectedResume ? linkedJobs(workspace, selectedResume.id) : [];
+  const activeJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const parent = selectedResume ? workspace.resumes.find((item) => item.id === selectedResume.parentId) : null;
-  const analyses = selectedResume ? workspace.aiAnalyses.filter((item) => item.resumeId === selectedResume.id) : [];
-  const selectVersion = (id: string) => { setParentVisible(false); setListOpen(false); setFocusedChange(null); onSelect(id); };
+  const analysis = selectedResume && activeJob ? workspace.aiAnalyses.find((item) => item.resumeId === selectedResume.id && item.jobId === activeJob.id) : undefined;
+  const selectVersion = (id: string) => {
+    const nextJobs = linkedJobs(workspace, id);
+    setParentVisible(false); setDetailTab("changes"); setFocusedChange(null);
+    if (!nextJobs.some((job) => job.id === selectedJobId)) onSelectJob(nextJobs[0]?.id ?? null);
+    onSelect(id);
+  };
   const focusChange = (id: string) => {
-    setListOpen(true); setFocusedChange(id);
+    setDetailTab("changes"); setFocusedChange(id);
     setTimeout(() => document.getElementById(`diff-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
     setTimeout(() => setFocusedChange(null), 1800);
   };
@@ -506,16 +514,24 @@ function ResumeLibrary({ workspace, selectedResume, onSelect, onUpload, onDownlo
         <div className="detail-header"><div><span className="status-chip">{selectedResume.parentId ? `基于 ${parent?.name ?? "未知版本"}` : "根简历"}</span><h2>{selectedResume.name}</h2><p>{selectedResume.filename} · {(selectedResume.fileSize / 1024).toFixed(0)} KB</p></div><div className="button-row">{!versionListVisible && <button onClick={() => setVersionListVisible(true)}>显示版本栏</button>}<button onClick={() => onDownload(selectedResume)}>下载原文件</button><button className="danger-text" onClick={() => onDelete(selectedResume)}>永久删除</button></div></div>
         {selectedResume.parseWarnings.length > 0 && <div className="warning-box">{selectedResume.parseWarnings.map((warning) => <p key={warning}>识别提示：{warning}</p>)}</div>}
         <label className="parent-picker">父版本<select value={selectedResume.parentId ?? ""} onChange={(event) => onReparent(selectedResume, event.target.value || null)}><option value="">设为根简历</option>{workspace.resumes.filter((item) => item.id !== selectedResume.id).map((item) => <option key={item.id} value={item.id} disabled={!canAssignParent(workspace, selectedResume.id, item.id)}>{item.name}</option>)}</select><small>修改父版本后，差异会重新计算；已有 AI 分析会被移除。</small></label>
-        <div className="detail-section"><div className="section-heading"><h3>关联岗位</h3><span>{jobs.length} 个</span></div><div className="tag-row">{jobs.length ? jobs.map((job) => <button className="job-tag" key={job.id} onClick={() => onOpenJob(job.id)}>{job.company}｜{job.role}</button>) : <span className="quiet-box">这份简历尚未关联岗位</span>}</div></div>
+        <div className="detail-section resume-job-section"><div className="section-heading"><h3>关联岗位与 JD</h3><span>{jobs.length} 个</span></div>{activeJob ? <><div className="resume-job-toolbar"><label>当前分析岗位<select value={activeJob.id} onChange={(event) => onSelectJob(event.target.value)}>{jobs.map((job) => <option key={job.id} value={job.id}>{job.company}｜{job.role}</option>)}</select></label><button onClick={() => onOpenJob(activeJob.id)}>在岗位工作台编辑</button></div><pre className="jd-view resume-jd-view">{activeJob.jdText || "这个岗位尚未填写完整 JD；补充后才能进行匹配分析。"}</pre></> : <p className="quiet-box">这份简历尚未关联岗位。请先在岗位工作台建立关联，再进行岗位匹配分析。</p>}</div>
         <div className="detail-section"><div className="section-heading"><h3>{report ? "相对父版本的变化" : "结构化简历"}</h3><span>{report ? `${report.items.length} 处${report.reviewItems.length ? ` · ${report.reviewItems.length} 项待确认` : ""}` : "当前版本"}</span></div>{!report ? <StructuredResume sections={buildStructuredDocument(selectedResume.blocks)} /> : <>
           {report.algorithmVersion < 3 && <div className="legacy-diff-notice"><div><strong>可使用新版规则重新识别</strong><p>新版能识别“核心能力”等栏目别名，并生成结构化父子对比；旧结果不会自动覆盖。</p></div><button onClick={() => onReanalyze(selectedResume)}>使用新版规则重新识别</button></div>}
-          <button className="diff-list-toggle" aria-expanded={listOpen} onClick={() => setListOpen((value) => !value)}>{listOpen ? "收起变化清单" : `展开变化清单（${report.items.length + report.reviewItems.length}）`}</button>
-          {listOpen && <div className="change-list-panel">{report.reviewItems.length > 0 && <section className="review-group"><div className="diff-group-heading"><div><h4>需要你确认的匹配</h4><p>系统无法确定两段是否属于同一项经历；确认后才会进入正式差异和 AI 分析。</p></div><span>{report.reviewItems.length}</span></div><div className="diff-list">{report.reviewItems.map((item) => <ReviewCard key={item.id} item={item} onChange={onUpdateReview} onResolve={onResolveReview} />)}</div></section>}{report.items.length === 0 && report.reviewItems.length === 0 ? <p className="quiet-box">没有识别到内容变化。</p> : <DiffGroups report={report} analyses={analyses.flatMap((analysis) => analysis.items)} focusedId={focusedChange} onMerge={onMergeChanges} onChange={onUpdateDiff} />}</div>}
-          {report.algorithmVersion === 3 ? <><div className="annotated-toolbar"><div><strong>标注后的当前版本</strong><span>点击变化标签可定位详细清单</span></div><button onClick={() => setParentVisible((value) => !value)}>{parentVisible ? "收起父版本" : "显示父版本"}</button></div><AnnotatedComparison report={report} parentVisible={parentVisible} onFocus={focusChange} /></> : <StructuredResume sections={buildStructuredDocument(selectedResume.blocks)} />}
+          <div className="resume-detail-tabs" role="tablist" aria-label="差异查看方式"><button role="tab" aria-selected={detailTab === "changes"} className={detailTab === "changes" ? "active" : ""} onClick={() => setDetailTab("changes")}>变化清单 <span>{report.items.length + report.reviewItems.length}</span></button><button role="tab" aria-selected={detailTab === "comparison"} className={detailTab === "comparison" ? "active" : ""} onClick={() => setDetailTab("comparison")}>版本对照</button></div>
+          {detailTab === "changes" ? <div className="change-list-panel"><AiAnalysisPanel analysis={analysis} job={activeJob} resume={selectedResume} report={report} busy={Boolean(activeJob && aiBusyKey === `${selectedResume.id}:${activeJob.id}`)} onAnalyze={onAnalyze} />{report.reviewItems.length > 0 && <section className="review-group"><div className="diff-group-heading"><div><h4>需要你确认的匹配</h4><p>系统无法确定两段是否属于同一项经历；确认后才会进入正式差异和 AI 分析。</p></div><span>{report.reviewItems.length}</span></div><div className="diff-list">{report.reviewItems.map((item) => <ReviewCard key={item.id} item={item} onChange={onUpdateReview} onResolve={onResolveReview} />)}</div></section>}{report.items.length === 0 && report.reviewItems.length === 0 ? <p className="quiet-box">没有识别到内容变化。</p> : <DiffGroups report={report} analyses={analysis?.items ?? []} focusedId={focusedChange} onMerge={onMergeChanges} onChange={onUpdateDiff} />}</div> : <div className="comparison-panel">{report.algorithmVersion === 3 ? <><div className="annotated-toolbar"><div><strong>结构化版本对照</strong><span>默认展示当前版本；点击变化位置可返回详细清单</span></div><button onClick={() => setParentVisible((value) => !value)}>{parentVisible ? "收起父版本" : "显示父版本"}</button></div><AnnotatedComparison report={report} parentVisible={parentVisible} onFocus={focusChange} /></> : <StructuredResume sections={buildStructuredDocument(selectedResume.blocks)} />}</div>}
         </>}</div>
       </> : <div className="detail-placeholder">选择一份简历查看版本详情</div>}</section>
     </div>}
   </div>;
+}
+
+const REQUIREMENT_STATUS = { covered: "已覆盖", partial: "部分覆盖", missing: "未覆盖", unknown: "无法判断" } as const;
+const REQUIREMENT_PRIORITY = { core: "核心", important: "重要", secondary: "次要" } as const;
+const EVIDENCE_LEVEL = { high: "证据较充分", medium: "证据一般", low: "证据有限" } as const;
+
+function AiAnalysisPanel({ analysis, job, resume, report, busy, onAnalyze }: { analysis?: AiAnalysis; job: Job | null; resume: ResumeNode; report: DiffReport; busy: boolean; onAnalyze: (resume: ResumeNode, job: Job) => void }) {
+  const canAnalyze = Boolean(job?.jdText.trim() && report.items.length && !busy);
+  return <section className="ai-analysis-panel"><div className="ai-analysis-heading"><div><p className="eyebrow">DEEPSEEK JOB FIT</p><h4>{job ? `${job.company}｜${job.role}` : "请先选择关联岗位"}</h4><p>综合当前简历、父版本、完整 JD 和已确认变化进行分析。</p></div><button className="primary" disabled={!canAnalyze} onClick={() => job && onAnalyze(resume, job)}>{busy ? "分析中…" : analysis ? "重新分析" : "开始 DeepSeek 分析"}</button></div>{!job ? <p className="ai-empty-note">关联岗位后，才能生成针对该 JD 的匹配诊断。</p> : !job.jdText.trim() ? <p className="ai-empty-note">当前岗位没有完整 JD，请先在岗位工作台补充。</p> : !analysis ? <p className="ai-empty-note">尚未生成分析。结果会保存在当前浏览器，并与这份简历及当前岗位绑定。</p> : analysis.overallMatch && analysis.requirements && analysis.actions ? <div className="ai-analysis-results"><div className="match-summary"><div className="match-range"><span>估计匹配区间</span><strong>{Math.round(analysis.overallMatch.scoreMin)}–{Math.round(analysis.overallMatch.scoreMax)}%</strong><small>{EVIDENCE_LEVEL[analysis.overallMatch.evidenceSufficiency]}</small></div><div><p>{analysis.overallMatch.summary}</p>{analysis.overallMatch.reasons.length > 0 && <ul>{analysis.overallMatch.reasons.map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}</ul>}</div></div><div className="ai-result-section"><div className="section-heading"><h5>JD 要求覆盖</h5><span>{analysis.requirements.length} 项</span></div><div className="requirement-list">{analysis.requirements.map((item, index) => <article key={`${item.requirement}-${index}`}><header><strong>{item.requirement}</strong><span className={`coverage-status coverage-${item.status}`}>{REQUIREMENT_STATUS[item.status]}</span><small>{REQUIREMENT_PRIORITY[item.priority]}</small></header><p>{item.reason}</p>{item.evidence.length > 0 && <ul>{item.evidence.map((evidence, evidenceIndex) => <li key={`${evidence}-${evidenceIndex}`}>{evidence}</li>)}</ul>}</article>)}</div></div><div className="ai-result-section"><div className="section-heading"><h5>下一步行动</h5><span>按优先级排列</span></div><div className="action-columns"><div><h6>值得继续修改</h6>{analysis.actions.filter((item) => item.type === "revise").map((item, index) => <article key={`${item.action}-${index}`}><span>{item.priority === "high" ? "高" : item.priority === "medium" ? "中" : "低"}</span><div><strong>{item.action}</strong><p>{item.rationale}</p></div></article>)}</div><div><h6>不建议为了 JD 硬改</h6>{analysis.actions.filter((item) => item.type === "do_not_force").map((item, index) => <article key={`${item.action}-${index}`}><span>边界</span><div><strong>{item.action}</strong><p>{item.rationale}</p></div></article>)}</div></div></div><p className="analysis-meta">分析生成于 {formatDate(analysis.importedAt)}；匹配区间是基于现有文本的估计，不代表招聘方结论。</p></div> : <div className="legacy-analysis-note"><strong>这是旧版逐项分析</strong><p>重新分析后将补充整体匹配、JD 覆盖情况和行动建议。</p></div>}</section>;
 }
 
 function StructuredResume({ sections }: { sections: StructuredSection[] }) {
@@ -572,7 +588,7 @@ function DiffCard({ item, report, focused, analysis, onMerge, onChange }: { item
   const reorder = item.kind === "reordered";
   const counterpart = item.kind === "added" ? "removed" : item.kind === "removed" ? "added" : null;
   const candidates = counterpart ? report.items.filter((entry) => entry.kind === counterpart).sort((a, b) => similarity(item.after || item.before, b.after || b.before) - similarity(item.after || item.before, a.after || a.before)) : [];
-  return <article id={`diff-${item.id}`} className={`diff-card diff-${item.kind} ${focused ? "diff-focused" : ""}`}><header><span>{DIFF_LABELS[item.kind]}</span><strong>{item.section}</strong>{item.kind === "modified" && <em>{item.source === "user" ? "用户确认" : `识别置信度 ${Math.round(item.confidence * 100)}%`}</em>}</header>{item.before && <div className="diff-line before"><small>{item.kind === "removed" ? "删除内容" : reorder ? "原顺序" : "修改前"}</small>{reorder ? <ReorderLines value={item.before} /> : <p>{item.before}</p>}</div>}{item.after && <div className="diff-line after"><small>{item.kind === "added" ? "新增内容" : reorder ? "新顺序" : "修改后"}</small>{reorder ? <ReorderLines value={item.after} /> : <p>{item.after}</p>}</div>}{candidates.length > 0 && <label className="merge-field"><span>其实是改写？</span><select defaultValue="" onChange={(event) => { if (event.target.value) onMerge(item.id, event.target.value); event.currentTarget.value = ""; }}><option value="">选择对应的{counterpart === "removed" ? "删除" : "新增"}项合并…</option>{candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.section} · {(candidate.before || candidate.after).slice(0, 42)}</option>)}</select></label>}{item.keywordMatches.length > 0 && <div className="keyword-row"><small>关键词推断</small>{item.keywordMatches.map((word) => <span key={word}>{word}</span>)}</div>}<label className="note-field">你的备注<input value={item.note} onChange={(event) => onChange({ ...item, note: event.target.value })} placeholder="例如：为了突出增长结果" /></label>{analysis && <div className="ai-result"><span>DeepSeek 分析 · {Math.round(analysis.confidence * 100)}%</span><p><strong>修改意图：</strong>{analysis.intent}</p><p><strong>JD 对应：</strong>{analysis.jdRequirement}</p><p><strong>建议：</strong>{analysis.recommendation}</p></div>}</article>;
+  return <article id={`diff-${item.id}`} className={`diff-card diff-${item.kind} ${focused ? "diff-focused" : ""}`}><header><span>{DIFF_LABELS[item.kind]}</span><strong>{item.section}</strong>{item.kind === "modified" && <em>{item.source === "user" ? "用户确认" : `识别置信度 ${Math.round(item.confidence * 100)}%`}</em>}</header>{item.before && <div className="diff-line before"><small>{item.kind === "removed" ? "删除内容" : reorder ? "原顺序" : "修改前"}</small>{reorder ? <ReorderLines value={item.before} /> : <p>{item.before}</p>}</div>}{item.after && <div className="diff-line after"><small>{item.kind === "added" ? "新增内容" : reorder ? "新顺序" : "修改后"}</small>{reorder ? <ReorderLines value={item.after} /> : <p>{item.after}</p>}</div>}{candidates.length > 0 && <label className="merge-field"><span>其实是改写？</span><select defaultValue="" onChange={(event) => { if (event.target.value) onMerge(item.id, event.target.value); event.currentTarget.value = ""; }}><option value="">选择对应的{counterpart === "removed" ? "删除" : "新增"}项合并…</option>{candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.section} · {(candidate.before || candidate.after).slice(0, 42)}</option>)}</select></label>}{item.keywordMatches.length > 0 && <div className="keyword-row"><small>关键词推断</small>{item.keywordMatches.map((word) => <span key={word}>{word}</span>)}</div>}<label className="note-field">你的备注<input value={item.note} onChange={(event) => onChange({ ...item, note: event.target.value })} placeholder="例如：为了突出增长结果" /></label>{analysis && <div className="ai-result"><div className="ai-item-heading"><span>DeepSeek 修改评价</span>{analysis.evaluation && <strong>{AI_EVALUATION[analysis.evaluation]}</strong>}<em>{Math.round(analysis.confidence * 100)}% 置信度</em></div><p><strong>修改意图：</strong>{analysis.intent}</p><p><strong>JD 对应：</strong>{analysis.jdRequirement}</p>{analysis.evidence && <p><strong>判断依据：</strong>{analysis.evidence}</p>}<p><strong>建议：</strong>{analysis.recommendation}</p></div>}</article>;
 }
 
 function ReviewCard({ item, onChange, onResolve }: { item: ReviewItem; onChange: (item: ReviewItem) => void; onResolve: (id: string, resolution: "modified" | "split") => void }) {

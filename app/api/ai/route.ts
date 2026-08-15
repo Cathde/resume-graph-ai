@@ -33,7 +33,7 @@ export async function POST(request: Request) {
         response_format: { type: "json_object" },
         stream: false,
         temperature: 0.2,
-        max_tokens: mode === "test" ? 64 : 4096,
+        max_tokens: mode === "test" ? 64 : 8192,
       }),
       signal: AbortSignal.timeout(mode === "test" ? 30_000 : 120_000),
     });
