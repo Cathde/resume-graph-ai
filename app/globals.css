@@ -130,11 +130,13 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .diff-groups { display: grid; gap: 22px; }
 .diff-group, .review-group { display: grid; gap: 10px; }
 .diff-group-heading { padding: 10px 12px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border: 1px solid #e2e8e6; border-radius: 8px; background: #f3f6f5; }
-.diff-group-modified .diff-group-heading, .diff-group-added .diff-group-heading { border: 1px solid #d8d8d8; border-radius: 10px; background: #fafafa; }
+.diff-group-modified .diff-group-heading, .diff-group-added .diff-group-heading { padding: 10px 2px; border: 0; border-bottom: 1.5px solid #b8b8b8; border-radius: 0; background: transparent; }
 .diff-group-heading h4 { margin: 0; color: var(--ink); font-size: 11px; }
 .diff-group-heading p { margin: 3px 0 0; color: #819092; font-size: 8.5px; line-height: 1.5; }
 .diff-group-heading > span { min-width: 22px; padding: 3px 7px; border-radius: 99px; background: #eef3f2; color: #637578; font-size: 8px; font-weight: 800; text-align: center; }
-.diff-group-modified .diff-group-heading > span, .diff-group-added .diff-group-heading > span { min-width: auto; padding: 0; border-radius: 0; background: transparent; color: #666; font-size: 9px; font-weight: 650; }
+.diff-group-modified .diff-group-heading h4, .diff-group-added .diff-group-heading h4 { font-size: 12px; font-weight: 750; }
+.diff-group-modified .diff-group-heading p, .diff-group-added .diff-group-heading p { color: #666; font-size: 9px; font-weight: 600; }
+.diff-group-modified .diff-group-heading > span, .diff-group-added .diff-group-heading > span { min-width: auto; padding: 1px 0 0; border-radius: 0; background: transparent; color: #444; font-size: 10px; font-weight: 750; }
 .diff-card { padding: 13px; border: 1px solid var(--line); border-left: 3px solid #75888a; border-radius: 9px; background: #fff; }
 .diff-added { border-left-color: #2f8071; }.diff-removed { border-left-color: #98a4a5; }.diff-modified { border-left-color: #4f8178; }.diff-reordered { border-left-color: #6c70aa; }
 .diff-group-modified .diff-card, .diff-group-added .diff-card { border: 1px solid #d8d8d8; border-radius: 10px; background: #fafafa; }
