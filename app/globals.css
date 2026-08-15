@@ -76,6 +76,9 @@ button { cursor: pointer; }
 .detail-section h3 { margin: 0; font-size: 12px; }
 .section-heading { margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .section-heading span, .section-heading a { color: var(--muted); font-size: 9px; text-decoration: none; }
+.resume-job-section > .section-heading, .resume-change-section > .section-heading { margin-bottom: 13px; }
+.resume-job-section > .section-heading h3, .resume-change-section > .section-heading h3 { color: #111; font-size: 14px; font-weight: 750; letter-spacing: -.15px; }
+.resume-job-section > .section-heading > span, .resume-change-section > .section-heading > span { color: #555; font-size: 10px; font-weight: 650; }
 .linked-resume { margin-bottom: 8px; padding: 11px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 9px; }
 .linked-resume > div { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .resume-link-main { flex: 1; border: 0 !important; padding: 0 !important; background: transparent !important; text-align: left; }
