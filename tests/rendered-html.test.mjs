@@ -18,7 +18,7 @@ test("server-renders Resume Graph AI product shell", async () => {
   assert.match(html, /上传新简历/);
   assert.match(html, /只存当前浏览器/);
   assert.match(html, /AI 设置/);
-  assert.match(html, /DeepSeek/);
+  assert.match(html, /所选 AI 服务商/);
   assert.doesNotMatch(html, /进一步解释修改依据|生成 AI 材料/);
   assert.doesNotMatch(html, /Building your site|codex-preview|react-loading-skeleton/);
 });

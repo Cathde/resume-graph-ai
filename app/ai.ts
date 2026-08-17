@@ -1,7 +1,43 @@
 import { anonymizeMaterial } from "./model.ts";
 import type { AiActionItem, AiAnalysis, AiAnalysisItem, AiRequirementMatch, DiffReport, Job, ResumeNode } from "./model.ts";
 
+export type AiProviderId = "deepseek" | "openai" | "custom";
+
+export type AiProvider = {
+  id: AiProviderId;
+  name: string;
+  endpoint: string;
+  defaultModel: string;
+  description: string;
+};
+
+export const AI_PROVIDERS: AiProvider[] = [
+  {
+    id: "deepseek",
+    name: "DeepSeek",
+    endpoint: "https://api.deepseek.com/chat/completions",
+    defaultModel: "deepseek-chat",
+    description: "DeepSeek 官方 OpenAI 兼容接口",
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    endpoint: "https://api.openai.com/v1/chat/completions",
+    defaultModel: "gpt-4.1-mini",
+    description: "OpenAI Chat Completions 接口",
+  },
+  {
+    id: "custom",
+    name: "自定义兼容接口",
+    endpoint: "",
+    defaultModel: "",
+    description: "适用于提供 OpenAI Chat Completions 兼容接口的其他服务",
+  },
+];
+
 export type AiSettings = {
+  provider: AiProviderId;
+  endpoint: string;
   apiKey: string;
   model: string;
   remember: boolean;
@@ -9,15 +45,35 @@ export type AiSettings = {
 };
 
 export const DEFAULT_AI_SETTINGS: AiSettings = {
+  provider: "deepseek",
+  endpoint: AI_PROVIDERS[0].endpoint,
   apiKey: "",
-  model: "deepseek-v4-flash",
+  model: AI_PROVIDERS[0].defaultModel,
   remember: false,
   anonymize: true,
 };
 
-export const AI_SETTINGS_KEY = "resume-graph-deepseek-settings";
+export const AI_SETTINGS_KEY = "resume-graph-ai-settings-v2";
+export const LEGACY_AI_SETTINGS_KEY = "resume-graph-deepseek-settings";
 
-export function buildDeepSeekPrompt(parent: ResumeNode, child: ResumeNode, report: DiffReport, job: Job, anonymize: boolean) {
+export function getAiProvider(provider: AiProviderId) {
+  return AI_PROVIDERS.find((item) => item.id === provider) ?? AI_PROVIDERS[0];
+}
+
+export function normalizeAiSettings(saved: Partial<AiSettings>): AiSettings {
+  const provider = AI_PROVIDERS.some((item) => item.id === saved.provider) ? saved.provider as AiProviderId : "deepseek";
+  const preset = getAiProvider(provider);
+  return {
+    ...DEFAULT_AI_SETTINGS,
+    ...saved,
+    provider,
+    endpoint: provider === "custom" ? String(saved.endpoint ?? "") : preset.endpoint,
+    apiKey: String(saved.apiKey ?? ""),
+    model: String(saved.model ?? preset.defaultModel),
+  };
+}
+
+export function buildAiPrompt(parent: ResumeNode, child: ResumeNode, report: DiffReport, job: Job, anonymize: boolean) {
   const changes = report.items.map((item) => ({
     diffItemId: item.id,
     type: item.kind,
@@ -96,8 +152,11 @@ type ParsedAnalysis = Pick<AiAnalysis, "overallMatch" | "requirements" | "items"
 const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T => allowed.includes(value as T) ? value as T : fallback;
 const strings = (value: unknown) => Array.isArray(value) ? value.map(String).filter(Boolean) : [];
 
-export function parseDeepSeekAnalysis(input: string, report: DiffReport): ParsedAnalysis {
-  const parsed = JSON.parse(input) as Record<string, unknown>;
+export function parseAiAnalysis(input: string, report: DiffReport): ParsedAnalysis {
+  const normalized = input.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const start = normalized.indexOf("{");
+  const end = normalized.lastIndexOf("}");
+  const parsed = JSON.parse(start >= 0 && end > start ? normalized.slice(start, end + 1) : normalized) as Record<string, unknown>;
   if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("AI 返回结果必须是 JSON 对象");
   const rawOverall = parsed.overallMatch as Record<string, unknown> | undefined;
   if (!rawOverall || typeof rawOverall !== "object") throw new Error("AI 返回结果缺少整体匹配结论");

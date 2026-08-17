@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDeepSeekPrompt, parseDeepSeekAnalysis } from "../app/ai.ts";
+import { buildAiPrompt, normalizeAiSettings, parseAiAnalysis } from "../app/ai.ts";
 
 const parent = {
   id: "parent", name: "通用版", extractedText: "邮箱 user@example.com 手机 13812345678\n实习经历\n内容运营",
@@ -13,8 +13,8 @@ const report = {
 };
 const job = { company: "示例公司", role: "增长运营", jdText: "负责用户增长与内容策略" };
 
-test("DeepSeek prompt hides common contacts and requests strict JSON", () => {
-  const prompt = buildDeepSeekPrompt(parent, child, report, job, true);
+test("AI prompt hides common contacts and requests strict JSON", () => {
+  const prompt = buildAiPrompt(parent, child, report, job, true);
   assert.doesNotMatch(prompt, /user@example\.com|13812345678/);
   assert.match(prompt, /JSON/);
   assert.match(prompt, /change-1/);
@@ -22,7 +22,7 @@ test("DeepSeek prompt hides common contacts and requests strict JSON", () => {
   assert.match(prompt, /overallMatch|requirements|actions|do_not_force/);
 });
 
-test("DeepSeek response includes overall fit, coverage, change evaluation and actions", () => {
+test("AI response includes overall fit, coverage, change evaluation and actions", () => {
   const valid = JSON.stringify({
     overallMatch: { scoreMin: 62, scoreMax: 74, evidenceSufficiency: "medium", summary: "方向相关但增长结果证据不足", reasons: ["有内容运营经验"] },
     requirements: [{ requirement: "用户增长", priority: "core", status: "partial", evidence: ["内容运营"], reason: "有相关经历但缺少转化结果" }],
@@ -35,21 +35,28 @@ test("DeepSeek response includes overall fit, coverage, change evaluation and ac
       { priority: "high", type: "do_not_force", action: "不要虚构海外增长", rationale: "简历没有对应经历" },
     ],
   });
-  const parsed = parseDeepSeekAnalysis(valid, report);
+  const parsed = parseAiAnalysis(`\`\`\`json\n${valid}\n\`\`\``, report);
   assert.deepEqual([parsed.overallMatch.scoreMin, parsed.overallMatch.scoreMax], [62, 74]);
   assert.equal(parsed.requirements[0].status, "partial");
   assert.equal(parsed.items[0].evaluation, "partially_effective");
   assert.equal(parsed.actions[1].type, "do_not_force");
 });
 
-test("DeepSeek response rejects incomplete or inconsistent analysis", () => {
+test("AI response rejects incomplete or inconsistent analysis", () => {
   const base = {
     overallMatch: { scoreMin: 62, scoreMax: 74, evidenceSufficiency: "medium", summary: "匹配一般", reasons: [] },
     requirements: [{ requirement: "增长", priority: "core", status: "partial", evidence: [], reason: "证据不足" }],
     items: [],
     actions: [{ priority: "high", type: "revise", action: "补充结果", rationale: "增强证据" }],
   };
-  assert.throws(() => parseDeepSeekAnalysis(JSON.stringify(base), report), /未覆盖全部/);
-  assert.throws(() => parseDeepSeekAnalysis(JSON.stringify({ ...base, overallMatch: { ...base.overallMatch, scoreMin: 90, scoreMax: 60 } }), report), /匹配区间无效/);
-  assert.throws(() => parseDeepSeekAnalysis(JSON.stringify({ ...base, items: [{ diffItemId: "unknown" }] }), report), /无法对应或重复/);
+  assert.throws(() => parseAiAnalysis(JSON.stringify(base), report), /未覆盖全部/);
+  assert.throws(() => parseAiAnalysis(JSON.stringify({ ...base, overallMatch: { ...base.overallMatch, scoreMin: 90, scoreMax: 60 } }), report), /匹配区间无效/);
+  assert.throws(() => parseAiAnalysis(JSON.stringify({ ...base, items: [{ diffItemId: "unknown" }] }), report), /无法对应或重复/);
+});
+
+test("legacy DeepSeek settings migrate to the provider-neutral format", () => {
+  const settings = normalizeAiSettings({ apiKey: "sk-old", model: "deepseek-chat", remember: true });
+  assert.equal(settings.provider, "deepseek");
+  assert.equal(settings.endpoint, "https://api.deepseek.com/chat/completions");
+  assert.equal(settings.apiKey, "sk-old");
 });

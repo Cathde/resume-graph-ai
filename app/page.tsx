@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fileHash, parseResumeFile } from "./file-parser";
 import { assessExtractedText } from "./extraction-quality";
-import { AI_SETTINGS_KEY, DEFAULT_AI_SETTINGS, buildDeepSeekPrompt, parseDeepSeekAnalysis } from "./ai";
+import { AI_PROVIDERS, AI_SETTINGS_KEY, DEFAULT_AI_SETTINGS, LEGACY_AI_SETTINGS_KEY, buildAiPrompt, getAiProvider, normalizeAiSettings, parseAiAnalysis } from "./ai";
 import type { AiSettings } from "./ai";
 import {
   JOB_STATUSES,
@@ -102,12 +102,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const raw = localStorage.getItem(AI_SETTINGS_KEY) ?? sessionStorage.getItem(AI_SETTINGS_KEY);
+    const raw = localStorage.getItem(AI_SETTINGS_KEY) ?? sessionStorage.getItem(AI_SETTINGS_KEY) ?? localStorage.getItem(LEGACY_AI_SETTINGS_KEY) ?? sessionStorage.getItem(LEGACY_AI_SETTINGS_KEY);
     if (!raw) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     try {
-      const saved = JSON.parse(raw) as Partial<AiSettings>;
-      const next = { ...DEFAULT_AI_SETTINGS, ...saved, apiKey: String(saved.apiKey ?? ""), model: String(saved.model ?? DEFAULT_AI_SETTINGS.model) };
+      const next = normalizeAiSettings(JSON.parse(raw) as Partial<AiSettings>);
       timer = setTimeout(() => {
         setAiSettings(next);
         setAiDraft(next);
@@ -115,6 +114,8 @@ export default function Home() {
     } catch {
       localStorage.removeItem(AI_SETTINGS_KEY);
       sessionStorage.removeItem(AI_SETTINGS_KEY);
+      localStorage.removeItem(LEGACY_AI_SETTINGS_KEY);
+      sessionStorage.removeItem(LEGACY_AI_SETTINGS_KEY);
     }
     return () => { if (timer) clearTimeout(timer); };
   }, []);
@@ -331,12 +332,14 @@ export default function Home() {
   };
 
   const saveAiSettings = () => {
-    const next = { ...aiDraft, apiKey: aiDraft.apiKey.trim(), model: aiDraft.model.trim() };
-    if (!next.apiKey || !next.model) return notify("请填写 API Key 和模型名称");
+    const next = { ...aiDraft, endpoint: aiDraft.endpoint.trim(), apiKey: aiDraft.apiKey.trim(), model: aiDraft.model.trim() };
+    if (!next.apiKey || !next.model || (next.provider === "custom" && !next.endpoint)) return notify("请填写 API 地址、API Key 和模型名称");
     const storage = next.remember ? localStorage : sessionStorage;
     const other = next.remember ? sessionStorage : localStorage;
     storage.setItem(AI_SETTINGS_KEY, JSON.stringify(next));
     other.removeItem(AI_SETTINGS_KEY);
+    localStorage.removeItem(LEGACY_AI_SETTINGS_KEY);
+    sessionStorage.removeItem(LEGACY_AI_SETTINGS_KEY);
     setAiSettings(next);
     setAiSettingsOpen(false);
     notify(next.remember ? "AI 设置已保存到当前浏览器" : "AI 设置仅在本次浏览器会话中有效");
@@ -345,19 +348,21 @@ export default function Home() {
   const clearAiSettings = () => {
     localStorage.removeItem(AI_SETTINGS_KEY);
     sessionStorage.removeItem(AI_SETTINGS_KEY);
+    localStorage.removeItem(LEGACY_AI_SETTINGS_KEY);
+    sessionStorage.removeItem(LEGACY_AI_SETTINGS_KEY);
     setAiSettings(DEFAULT_AI_SETTINGS);
     setAiDraft(DEFAULT_AI_SETTINGS);
     notify("API Key 已从当前浏览器清除");
   };
 
-  const requestDeepSeek = async (settings: AiSettings, mode: "test" | "analyze", prompt = "") => {
+  const requestAi = async (settings: AiSettings, mode: "test" | "analyze", prompt = "") => {
     const response = await fetch("/api/ai", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: settings.apiKey, model: settings.model, mode, prompt }),
+      body: JSON.stringify({ provider: settings.provider, endpoint: settings.endpoint, apiKey: settings.apiKey, model: settings.model, mode, prompt }),
     });
     const data = await response.json() as { content?: string; error?: string; usage?: { total_tokens?: number } };
-    if (!response.ok || !data.content) throw new Error(data.error || "DeepSeek 请求失败");
+    if (!response.ok || !data.content) throw new Error(data.error || "AI 请求失败");
     return { content: data.content, usage: data.usage };
   };
 
@@ -365,10 +370,10 @@ export default function Home() {
     if (!aiDraft.apiKey.trim() || !aiDraft.model.trim()) return notify("请先填写 API Key 和模型名称");
     setAiTesting(true);
     try {
-      await requestDeepSeek(aiDraft, "test");
-      notify("DeepSeek 连接成功");
+      await requestAi(aiDraft, "test");
+      notify(`${getAiProvider(aiDraft.provider).name} 连接成功`);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "DeepSeek 连接失败");
+      notify(error instanceof Error ? error.message : "AI 连接失败");
     } finally { setAiTesting(false); }
   };
 
@@ -379,18 +384,18 @@ export default function Home() {
     if (!report.items.length) return notify("没有已确认的差异可供 AI 分析");
     if (!aiSettings.apiKey) {
       openAiSettings();
-      return notify("请先配置 DeepSeek API");
+      return notify("请先配置 AI API");
     }
     const busyKey = `${resume.id}:${job.id}`;
     setAiBusyKey(busyKey);
     try {
-      const prompt = buildDeepSeekPrompt(parent, resume, report, job, aiSettings.anonymize);
-      const result = await requestDeepSeek(aiSettings, "analyze", prompt);
-      const analysis = parseDeepSeekAnalysis(result.content, report);
+      const prompt = buildAiPrompt(parent, resume, report, job, aiSettings.anonymize);
+      const result = await requestAi(aiSettings, "analyze", prompt);
+      const analysis = parseAiAnalysis(result.content, report);
       update((current) => ({ ...current, aiAnalyses: [...current.aiAnalyses.filter((item) => !(item.resumeId === resume.id && item.jobId === job.id)), { id: uid("ai"), resumeId: resume.id, jobId: job.id, analysisVersion: 2, ...analysis, importedAt: new Date().toISOString() }] }));
       setSelectedResumeId(resume.id);
       setSelectedJobId(job.id);
-      notify(`DeepSeek 分析已保存${result.usage?.total_tokens ? ` · ${result.usage.total_tokens} tokens` : ""}`);
+      notify(`${getAiProvider(aiSettings.provider).name} 分析已保存${result.usage?.total_tokens ? ` · ${result.usage.total_tokens} tokens` : ""}`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "AI 分析失败");
     } finally { setAiBusyKey(""); }
@@ -449,7 +454,7 @@ export default function Home() {
       <input ref={uploadInputRef} className="sr-only" type="file" accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf" onChange={(event) => event.target.files?.[0] && prepareUpload(event.target.files[0])} />
       <input ref={backupInputRef} className="sr-only" type="file" accept=".zip,application/zip" onChange={(event) => event.target.files?.[0] && restoreBackup(event.target.files[0])} />
 
-      <section className="privacy-strip"><span>本地资料库</span> 原始文件与识别结果只存当前浏览器；仅在你主动分析时向 DeepSeek 发送必要文本。</section>
+      <section className="privacy-strip"><span>本地资料库</span> 原始文件与识别结果只存当前浏览器；仅在你主动分析时向所选 AI 服务商发送必要文本。</section>
 
       {view === "jobs" && <JobWorkspace workspace={workspace} counts={counts} selectedJob={selectedJob} onSelect={setSelectedJobId} onCreate={startJob} onEdit={setJobEditor} onUpdate={(job) => update((current) => ({ ...current, jobs: current.jobs.map((item) => item.id === job.id ? job : item) }))} onDelete={(job) => { if (window.confirm(`永久删除岗位「${job.company}｜${job.role}」及其关联记录？`)) { update((current) => ({ ...current, jobs: current.jobs.filter((item) => item.id !== job.id), links: current.links.filter((item) => item.jobId !== job.id), aiAnalyses: current.aiAnalyses.filter((item) => item.jobId !== job.id) })); setSelectedJobId(null); } }} onOpenResume={(id) => { setSelectedResumeId(id); setView("resumes"); }} onSubmitted={setSubmitted} onUnlink={unlinkResume} onLink={linkExistingResume} />}
       {view === "resumes" && <ResumeLibrary workspace={workspace} selectedResume={selectedResume} selectedJobId={selectedJobId} onSelectJob={setSelectedJobId} onSelect={setSelectedResumeId} onUpload={selectUpload} onDownload={downloadResume} onDelete={deleteResume} onReparent={reparentResume} onReanalyze={reanalyzeResume} onMergeChanges={mergeChanges} onUpdateDiff={(item) => update((current) => ({ ...current, diffs: current.diffs.map((report) => report.childResumeId === selectedResume?.id ? { ...report, items: report.items.map((entry) => entry.id === item.id ? item : entry) } : report) }))} onUpdateReview={updateReview} onResolveReview={resolveReview} onOpenJob={(id) => { setSelectedJobId(id); setView("jobs"); }} onAnalyze={analyzeWithAi} aiBusyKey={aiBusyKey} />}
@@ -531,7 +536,7 @@ const EVIDENCE_LEVEL = { high: "证据较充分", medium: "证据一般", low: "
 
 function AiAnalysisPanel({ analysis, job, resume, report, busy, onAnalyze }: { analysis?: AiAnalysis; job: Job | null; resume: ResumeNode; report: DiffReport; busy: boolean; onAnalyze: (resume: ResumeNode, job: Job) => void }) {
   const canAnalyze = Boolean(job?.jdText.trim() && report.items.length && !busy);
-  return <section className="ai-analysis-panel"><div className="ai-analysis-heading"><div><p className="eyebrow">DEEPSEEK JOB FIT</p><h4>{job ? `${job.company}｜${job.role}` : "请先选择关联岗位"}</h4><p>综合当前简历、父版本、完整 JD 和已确认变化进行分析。</p></div><button className="primary" disabled={!canAnalyze} onClick={() => job && onAnalyze(resume, job)}>{busy ? "分析中…" : analysis ? "重新分析" : "开始 DeepSeek 分析"}</button></div>{!job ? <p className="ai-empty-note">关联岗位后，才能生成针对该 JD 的匹配诊断。</p> : !job.jdText.trim() ? <p className="ai-empty-note">当前岗位没有完整 JD，请先在岗位工作台补充。</p> : !analysis ? <p className="ai-empty-note">尚未生成分析。结果会保存在当前浏览器，并与这份简历及当前岗位绑定。</p> : analysis.overallMatch && analysis.requirements && analysis.actions ? <div className="ai-analysis-results"><div className="match-summary"><div className="match-range"><span>估计匹配区间</span><strong>{Math.round(analysis.overallMatch.scoreMin)}–{Math.round(analysis.overallMatch.scoreMax)}%</strong><small>{EVIDENCE_LEVEL[analysis.overallMatch.evidenceSufficiency]}</small></div><div><p>{analysis.overallMatch.summary}</p>{analysis.overallMatch.reasons.length > 0 && <ul>{analysis.overallMatch.reasons.map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}</ul>}</div></div><div className="ai-result-section"><div className="section-heading"><h5>JD 要求覆盖</h5><span>{analysis.requirements.length} 项</span></div><div className="requirement-list">{analysis.requirements.map((item, index) => <article key={`${item.requirement}-${index}`}><header><strong>{item.requirement}</strong><span className={`coverage-status coverage-${item.status}`}>{REQUIREMENT_STATUS[item.status]}</span><small>{REQUIREMENT_PRIORITY[item.priority]}</small></header><p>{item.reason}</p>{item.evidence.length > 0 && <ul>{item.evidence.map((evidence, evidenceIndex) => <li key={`${evidence}-${evidenceIndex}`}>{evidence}</li>)}</ul>}</article>)}</div></div><div className="ai-result-section"><div className="section-heading"><h5>下一步行动</h5><span>按优先级排列</span></div><div className="action-columns"><div><h6>值得继续修改</h6>{analysis.actions.filter((item) => item.type === "revise").map((item, index) => <article key={`${item.action}-${index}`}><span>{item.priority === "high" ? "高" : item.priority === "medium" ? "中" : "低"}</span><div><strong>{item.action}</strong><p>{item.rationale}</p></div></article>)}</div><div><h6>不建议为了 JD 硬改</h6>{analysis.actions.filter((item) => item.type === "do_not_force").map((item, index) => <article key={`${item.action}-${index}`}><span>边界</span><div><strong>{item.action}</strong><p>{item.rationale}</p></div></article>)}</div></div></div><p className="analysis-meta">分析生成于 {formatDate(analysis.importedAt)}；匹配区间是基于现有文本的估计，不代表招聘方结论。</p></div> : <div className="legacy-analysis-note"><strong>这是旧版逐项分析</strong><p>重新分析后将补充整体匹配、JD 覆盖情况和行动建议。</p></div>}</section>;
+  return <section className="ai-analysis-panel"><div className="ai-analysis-heading"><div><p className="eyebrow">AI JOB FIT</p><h4>{job ? `${job.company}｜${job.role}` : "请先选择关联岗位"}</h4><p>综合当前简历、父版本、完整 JD 和已确认变化进行分析。</p></div><button className="primary" disabled={!canAnalyze} onClick={() => job && onAnalyze(resume, job)}>{busy ? "分析中…" : analysis ? "重新分析" : "开始 AI 分析"}</button></div>{!job ? <p className="ai-empty-note">关联岗位后，才能生成针对该 JD 的匹配诊断。</p> : !job.jdText.trim() ? <p className="ai-empty-note">当前岗位没有完整 JD，请先在岗位工作台补充。</p> : !analysis ? <p className="ai-empty-note">尚未生成分析。结果会保存在当前浏览器，并与这份简历及当前岗位绑定。</p> : analysis.overallMatch && analysis.requirements && analysis.actions ? <div className="ai-analysis-results"><div className="match-summary"><div className="match-range"><span>估计匹配区间</span><strong>{Math.round(analysis.overallMatch.scoreMin)}–{Math.round(analysis.overallMatch.scoreMax)}%</strong><small>{EVIDENCE_LEVEL[analysis.overallMatch.evidenceSufficiency]}</small></div><div><p>{analysis.overallMatch.summary}</p>{analysis.overallMatch.reasons.length > 0 && <ul>{analysis.overallMatch.reasons.map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}</ul>}</div></div><div className="ai-result-section"><div className="section-heading"><h5>JD 要求覆盖</h5><span>{analysis.requirements.length} 项</span></div><div className="requirement-list">{analysis.requirements.map((item, index) => <article key={`${item.requirement}-${index}`}><header><strong>{item.requirement}</strong><span className={`coverage-status coverage-${item.status}`}>{REQUIREMENT_STATUS[item.status]}</span><small>{REQUIREMENT_PRIORITY[item.priority]}</small></header><p>{item.reason}</p>{item.evidence.length > 0 && <ul>{item.evidence.map((evidence, evidenceIndex) => <li key={`${evidence}-${evidenceIndex}`}>{evidence}</li>)}</ul>}</article>)}</div></div><div className="ai-result-section"><div className="section-heading"><h5>下一步行动</h5><span>按优先级排列</span></div><div className="action-columns"><div><h6>值得继续修改</h6>{analysis.actions.filter((item) => item.type === "revise").map((item, index) => <article key={`${item.action}-${index}`}><span>{item.priority === "high" ? "高" : item.priority === "medium" ? "中" : "低"}</span><div><strong>{item.action}</strong><p>{item.rationale}</p></div></article>)}</div><div><h6>不建议为了 JD 硬改</h6>{analysis.actions.filter((item) => item.type === "do_not_force").map((item, index) => <article key={`${item.action}-${index}`}><span>边界</span><div><strong>{item.action}</strong><p>{item.rationale}</p></div></article>)}</div></div></div><p className="analysis-meta">分析生成于 {formatDate(analysis.importedAt)}；匹配区间是基于现有文本的估计，不代表招聘方结论。</p></div> : <div className="legacy-analysis-note"><strong>这是旧版逐项分析</strong><p>重新分析后将补充整体匹配、JD 覆盖情况和行动建议。</p></div>}</section>;
 }
 
 function StructuredResume({ sections }: { sections: StructuredSection[] }) {
@@ -588,7 +593,7 @@ function DiffCard({ item, report, focused, analysis, onMerge, onChange }: { item
   const reorder = item.kind === "reordered";
   const counterpart = item.kind === "added" ? "removed" : item.kind === "removed" ? "added" : null;
   const candidates = counterpart ? report.items.filter((entry) => entry.kind === counterpart).sort((a, b) => similarity(item.after || item.before, b.after || b.before) - similarity(item.after || item.before, a.after || a.before)) : [];
-  return <article id={`diff-${item.id}`} className={`diff-card diff-${item.kind} ${focused ? "diff-focused" : ""}`}><header><span>{DIFF_LABELS[item.kind]}</span><strong>{item.section}</strong>{item.kind === "modified" && <em>{item.source === "user" ? "用户确认" : `识别置信度 ${Math.round(item.confidence * 100)}%`}</em>}</header>{item.before && <div className="diff-line before"><small>{item.kind === "removed" ? "删除内容" : reorder ? "原顺序" : "修改前"}</small>{reorder ? <ReorderLines value={item.before} /> : <p>{item.before}</p>}</div>}{item.after && <div className="diff-line after"><small>{item.kind === "added" ? "新增内容" : reorder ? "新顺序" : "修改后"}</small>{reorder ? <ReorderLines value={item.after} /> : <p>{item.after}</p>}</div>}{candidates.length > 0 && <label className="merge-field"><span>其实是改写？</span><select defaultValue="" onChange={(event) => { if (event.target.value) onMerge(item.id, event.target.value); event.currentTarget.value = ""; }}><option value="">选择对应的{counterpart === "removed" ? "删除" : "新增"}项合并…</option>{candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.section} · {(candidate.before || candidate.after).slice(0, 42)}</option>)}</select></label>}{item.keywordMatches.length > 0 && <div className="keyword-row"><small>关键词推断</small>{item.keywordMatches.map((word) => <span key={word}>{word}</span>)}</div>}<label className="note-field">你的备注<input value={item.note} onChange={(event) => onChange({ ...item, note: event.target.value })} placeholder="例如：为了突出增长结果" /></label>{analysis && <div className="ai-result"><div className="ai-item-heading"><span>DeepSeek 修改评价</span>{analysis.evaluation && <strong>{AI_EVALUATION[analysis.evaluation]}</strong>}<em>{Math.round(analysis.confidence * 100)}% 置信度</em></div><p><strong>修改意图：</strong>{analysis.intent}</p><p><strong>JD 对应：</strong>{analysis.jdRequirement}</p>{analysis.evidence && <p><strong>判断依据：</strong>{analysis.evidence}</p>}<p><strong>建议：</strong>{analysis.recommendation}</p></div>}</article>;
+  return <article id={`diff-${item.id}`} className={`diff-card diff-${item.kind} ${focused ? "diff-focused" : ""}`}><header><span>{DIFF_LABELS[item.kind]}</span><strong>{item.section}</strong>{item.kind === "modified" && <em>{item.source === "user" ? "用户确认" : `识别置信度 ${Math.round(item.confidence * 100)}%`}</em>}</header>{item.before && <div className="diff-line before"><small>{item.kind === "removed" ? "删除内容" : reorder ? "原顺序" : "修改前"}</small>{reorder ? <ReorderLines value={item.before} /> : <p>{item.before}</p>}</div>}{item.after && <div className="diff-line after"><small>{item.kind === "added" ? "新增内容" : reorder ? "新顺序" : "修改后"}</small>{reorder ? <ReorderLines value={item.after} /> : <p>{item.after}</p>}</div>}{candidates.length > 0 && <label className="merge-field"><span>其实是改写？</span><select defaultValue="" onChange={(event) => { if (event.target.value) onMerge(item.id, event.target.value); event.currentTarget.value = ""; }}><option value="">选择对应的{counterpart === "removed" ? "删除" : "新增"}项合并…</option>{candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.section} · {(candidate.before || candidate.after).slice(0, 42)}</option>)}</select></label>}{item.keywordMatches.length > 0 && <div className="keyword-row"><small>关键词推断</small>{item.keywordMatches.map((word) => <span key={word}>{word}</span>)}</div>}<label className="note-field">你的备注<input value={item.note} onChange={(event) => onChange({ ...item, note: event.target.value })} placeholder="例如：为了突出增长结果" /></label>{analysis && <div className="ai-result"><div className="ai-item-heading"><span>AI 修改评价</span>{analysis.evaluation && <strong>{AI_EVALUATION[analysis.evaluation]}</strong>}<em>{Math.round(analysis.confidence * 100)}% 置信度</em></div><p><strong>修改意图：</strong>{analysis.intent}</p><p><strong>JD 对应：</strong>{analysis.jdRequirement}</p>{analysis.evidence && <p><strong>判断依据：</strong>{analysis.evidence}</p>}<p><strong>建议：</strong>{analysis.recommendation}</p></div>}</article>;
 }
 
 function ReviewCard({ item, onChange, onResolve }: { item: ReviewItem; onChange: (item: ReviewItem) => void; onResolve: (id: string, resolution: "modified" | "split") => void }) {
@@ -605,7 +610,12 @@ function UploadModal({ draft, resumes, jobs, onChange, onSave, onClose }: { draf
 }
 
 function AiSettingsModal({ settings, testing, onChange, onTest, onSave, onClear, onClose }: { settings: AiSettings; testing: boolean; onChange: (settings: AiSettings) => void; onTest: () => void; onSave: () => void; onClear: () => void; onClose: () => void }) {
-  return <Modal onClose={onClose} className="ai-settings-modal"><p className="eyebrow">PRIVATE AI CONNECTION</p><h2>DeepSeek API 设置</h2><p className="modal-note">API Key 不会写入网站代码或工作区备份。分析时，父子简历、已确认差异和当前 JD 会通过本站代理发送给 DeepSeek。</p><div className="ai-endpoint"><span>固定接口</span><code>https://api.deepseek.com/chat/completions</code></div><Field label="API Key" value={settings.apiKey} onChange={(apiKey) => onChange({ ...settings, apiKey })} type="password" placeholder="sk-…" /><Field label="模型名称" value={settings.model} onChange={(model) => onChange({ ...settings, model })} placeholder="deepseek-v4-flash" /><div className="setting-check"><input id="ai-anonymize" aria-labelledby="ai-anonymize-label" type="checkbox" checked={settings.anonymize} onChange={(event) => onChange({ ...settings, anonymize: event.target.checked })} /><span><strong id="ai-anonymize-label">分析前隐藏常见联系方式</strong><small>自动替换邮箱和电话号码；公司、学校、姓名及经历内容仍会发送。</small></span></div><div className="setting-check"><input id="ai-remember" aria-labelledby="ai-remember-label" type="checkbox" checked={settings.remember} onChange={(event) => onChange({ ...settings, remember: event.target.checked })} /><span><strong id="ai-remember-label">在当前浏览器记住 API Key</strong><small>关闭后只保留到本次浏览器会话结束；完整备份始终不包含 Key。</small></span></div><div className="modal-actions ai-settings-actions">{settings.apiKey && <button className="danger-text" onClick={onClear}>清除 Key</button>}<button onClick={onTest} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button><button className="primary" onClick={onSave}>保存设置</button></div></Modal>;
+  const provider = getAiProvider(settings.provider);
+  const changeProvider = (providerId: AiSettings["provider"]) => {
+    const next = getAiProvider(providerId);
+    onChange({ ...settings, provider: providerId, endpoint: next.endpoint, model: next.defaultModel, apiKey: "" });
+  };
+  return <Modal onClose={onClose} className="ai-settings-modal"><p className="eyebrow">PRIVATE AI CONNECTION</p><h2>AI API 设置</h2><p className="modal-note">API Key 不会写入网站代码或工作区备份。分析时，父子简历、已确认差异和当前 JD 会通过本站代理发送给你选择的 AI 服务商。</p><label className="field"><span>AI 服务商</span><select value={settings.provider} onChange={(event) => changeProvider(event.target.value as AiSettings["provider"])}>{AI_PROVIDERS.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><small>{provider.description}；切换服务商会清空当前 Key，避免误发。</small></label>{settings.provider === "custom" ? <Field label="Chat Completions API 地址" value={settings.endpoint} onChange={(endpoint) => onChange({ ...settings, endpoint })} placeholder="https://example.com/v1/chat/completions" /> : <div className="ai-endpoint"><span>请求接口</span><code>{provider.endpoint}</code></div>}<Field label="API Key" value={settings.apiKey} onChange={(apiKey) => onChange({ ...settings, apiKey })} type="password" placeholder="仅保存在当前浏览器" /><Field label="模型名称" value={settings.model} onChange={(model) => onChange({ ...settings, model })} placeholder={provider.defaultModel || "填写服务商提供的模型 ID"} /><div className="setting-check"><input id="ai-anonymize" aria-labelledby="ai-anonymize-label" type="checkbox" checked={settings.anonymize} onChange={(event) => onChange({ ...settings, anonymize: event.target.checked })} /><span><strong id="ai-anonymize-label">分析前隐藏常见联系方式</strong><small>自动替换邮箱和电话号码；公司、学校、姓名及经历内容仍会发送。</small></span></div><div className="setting-check"><input id="ai-remember" aria-labelledby="ai-remember-label" type="checkbox" checked={settings.remember} onChange={(event) => onChange({ ...settings, remember: event.target.checked })} /><span><strong id="ai-remember-label">在当前浏览器记住 API Key</strong><small>关闭后只保留到本次浏览器会话结束；完整备份始终不包含 Key。</small></span></div><div className="modal-actions ai-settings-actions">{settings.apiKey && <button className="danger-text" onClick={onClear}>清除 Key</button>}<button onClick={onTest} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button><button className="primary" onClick={onSave}>保存设置</button></div></Modal>;
 }
 
 function Modal({ children, onClose, className = "" }: { children: React.ReactNode; onClose: () => void; className?: string }) { return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className={`modal ${className}`} role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button>{children}</section></div>; }
