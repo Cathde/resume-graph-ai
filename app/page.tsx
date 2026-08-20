@@ -438,12 +438,12 @@ export default function Home() {
       <header className="topbar">
         <button className="brand" onClick={() => setView("jobs")}><span className="brand-mark">RG</span><span><strong>Resume Graph AI</strong><small>个人 AI 分析版</small></span></button>
         <nav aria-label="主要导航">
-          <button className={view === "jobs" ? "active" : ""} onClick={() => setView("jobs")}>岗位工作台</button>
-          <button className={view === "resumes" ? "active" : ""} onClick={() => setView("resumes")}>简历库</button>
-          <button className={view === "graph" ? "active" : ""} onClick={() => setView("graph")}>简历谱系</button>
+          <button className={view === "jobs" ? "active" : ""} aria-current={view === "jobs" ? "page" : undefined} onClick={() => setView("jobs")}>岗位工作台</button>
+          <button className={view === "resumes" ? "active" : ""} aria-current={view === "resumes" ? "page" : undefined} onClick={() => setView("resumes")}>简历库</button>
+          <button className={view === "graph" ? "active" : ""} aria-current={view === "graph" ? "page" : undefined} onClick={() => setView("graph")}>简历谱系</button>
         </nav>
         <div className="top-actions">
-          <span className={`save-pill save-${saveState}`}>{saveState === "loading" ? "读取中" : saveState === "saving" ? "保存中…" : saveState === "error" ? "保存失败" : "已保存在本机"}</span>
+          <span className={`save-pill save-${saveState}`} role="status" aria-live="polite" title="资料仅保存在当前浏览器">{saveState === "loading" ? "读取中" : saveState === "saving" ? "保存中…" : saveState === "error" ? "保存失败" : "已保存在本机"}</span>
           <button className="ghost ai-settings-button" onClick={openAiSettings}><span className={aiSettings.apiKey ? "ai-dot configured" : "ai-dot"} />AI 设置</button>
           <button className="ghost" onClick={doBackup}>导出完整备份</button>
           <button className="primary" onClick={selectUpload}>＋ 上传新简历</button>
@@ -520,10 +520,10 @@ function ResumeLibrary({ workspace, selectedResume, selectedJobId, onSelectJob, 
         {selectedResume.parseWarnings.length > 0 && <div className="warning-box">{selectedResume.parseWarnings.map((warning) => <p key={warning}>识别提示：{warning}</p>)}</div>}
         <label className="parent-picker">父版本<select value={selectedResume.parentId ?? ""} onChange={(event) => onReparent(selectedResume, event.target.value || null)}><option value="">设为根简历</option>{workspace.resumes.filter((item) => item.id !== selectedResume.id).map((item) => <option key={item.id} value={item.id} disabled={!canAssignParent(workspace, selectedResume.id, item.id)}>{item.name}</option>)}</select><small>修改父版本后，差异会重新计算；已有 AI 分析会被移除。</small></label>
         <div className="detail-section resume-job-section"><div className="section-heading"><h3>关联岗位与 JD</h3><span>{jobs.length} 个</span></div>{activeJob ? <><div className="resume-job-toolbar"><label>当前分析岗位<select value={activeJob.id} onChange={(event) => onSelectJob(event.target.value)}>{jobs.map((job) => <option key={job.id} value={job.id}>{job.company}｜{job.role}</option>)}</select></label><button onClick={() => onOpenJob(activeJob.id)}>在岗位工作台编辑</button></div><pre className="jd-view resume-jd-view">{activeJob.jdText || "这个岗位尚未填写完整 JD；补充后才能进行匹配分析。"}</pre></> : <p className="quiet-box">这份简历尚未关联岗位。请先在岗位工作台建立关联，再进行岗位匹配分析。</p>}</div>
-        <div className="detail-section resume-change-section"><div className="section-heading"><h3>{report ? "相对父版本的变化" : "结构化简历"}</h3><span>{report ? `${report.items.length} 处${report.reviewItems.length ? ` · ${report.reviewItems.length} 项待确认` : ""}` : "当前版本"}</span></div>{!report ? <StructuredResume sections={buildStructuredDocument(selectedResume.blocks)} /> : <>
+        <div id="resume-detail-section" className="detail-section resume-change-section"><div className="section-heading"><h3>{report ? "相对父版本的变化" : "结构化简历"}</h3><span>{report ? `${report.items.length} 处${report.reviewItems.length ? ` · ${report.reviewItems.length} 项待确认` : ""}` : "当前版本"}</span></div>{!report ? <StructuredResume sections={buildStructuredDocument(selectedResume.blocks)} /> : <>
           {report.algorithmVersion < 3 && <div className="legacy-diff-notice"><div><strong>可使用新版规则重新识别</strong><p>新版能识别“核心能力”等栏目别名，并生成结构化父子对比；旧结果不会自动覆盖。</p></div><button onClick={() => onReanalyze(selectedResume)}>使用新版规则重新识别</button></div>}
-          <div className="resume-detail-tabs" role="tablist" aria-label="差异查看方式"><button role="tab" aria-selected={detailTab === "changes"} className={detailTab === "changes" ? "active" : ""} onClick={() => setDetailTab("changes")}>变化清单 <span>{report.items.length + report.reviewItems.length}</span></button><button role="tab" aria-selected={detailTab === "comparison"} className={detailTab === "comparison" ? "active" : ""} onClick={() => setDetailTab("comparison")}>版本对照</button></div>
-          {detailTab === "changes" ? <div className="change-list-panel"><AiAnalysisPanel analysis={analysis} job={activeJob} resume={selectedResume} report={report} busy={Boolean(activeJob && aiBusyKey === `${selectedResume.id}:${activeJob.id}`)} onAnalyze={onAnalyze} />{report.reviewItems.length > 0 && <section className="review-group"><div className="diff-group-heading"><div><h4>需要你确认的匹配</h4><p>系统无法确定两段是否属于同一项经历；确认后才会进入正式差异和 AI 分析。</p></div><span>{report.reviewItems.length}</span></div><div className="diff-list">{report.reviewItems.map((item) => <ReviewCard key={item.id} item={item} onChange={onUpdateReview} onResolve={onResolveReview} />)}</div></section>}{report.items.length === 0 && report.reviewItems.length === 0 ? <p className="quiet-box">没有识别到内容变化。</p> : <DiffGroups report={report} analyses={analysis?.items ?? []} focusedId={focusedChange} onMerge={onMergeChanges} onChange={onUpdateDiff} />}</div> : <div className="comparison-panel">{report.algorithmVersion === 3 ? <><div className="annotated-toolbar"><div><strong>结构化版本对照</strong><span>默认展示当前版本；点击变化位置可返回详细清单</span></div><button onClick={() => setParentVisible((value) => !value)}>{parentVisible ? "收起父版本" : "显示父版本"}</button></div><AnnotatedComparison report={report} parentVisible={parentVisible} onFocus={focusChange} /></> : <StructuredResume sections={buildStructuredDocument(selectedResume.blocks)} />}</div>}
+          <div className="resume-detail-tabs" role="tablist" aria-label="差异查看方式"><button id="resume-tab-changes" role="tab" tabIndex={detailTab === "changes" ? 0 : -1} aria-selected={detailTab === "changes"} aria-controls="resume-panel-changes" className={detailTab === "changes" ? "active" : ""} onClick={() => setDetailTab("changes")} onKeyDown={(event) => { if (event.key === "ArrowRight" || event.key === "ArrowDown") { event.preventDefault(); setDetailTab("comparison"); requestAnimationFrame(() => document.getElementById("resume-tab-comparison")?.focus()); } else if (event.key === "Home") { event.preventDefault(); setDetailTab("changes"); } else if (event.key === "End") { event.preventDefault(); setDetailTab("comparison"); } }}>变化清单 <span>{report.items.length + report.reviewItems.length}</span></button><button id="resume-tab-comparison" role="tab" tabIndex={detailTab === "comparison" ? 0 : -1} aria-selected={detailTab === "comparison"} aria-controls="resume-panel-comparison" className={detailTab === "comparison" ? "active" : ""} onClick={() => setDetailTab("comparison")} onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); setDetailTab("changes"); requestAnimationFrame(() => document.getElementById("resume-tab-changes")?.focus()); } else if (event.key === "Home") { event.preventDefault(); setDetailTab("changes"); } else if (event.key === "End") { event.preventDefault(); setDetailTab("comparison"); } }}>版本对照</button></div>
+          {detailTab === "changes" ? <div id="resume-panel-changes" className="change-list-panel" role="tabpanel" aria-labelledby="resume-tab-changes" tabIndex={0}><AiAnalysisPanel analysis={analysis} job={activeJob} resume={selectedResume} report={report} busy={Boolean(activeJob && aiBusyKey === `${selectedResume.id}:${activeJob.id}`)} onAnalyze={onAnalyze} />{report.reviewItems.length > 0 && <section className="review-group"><div className="diff-group-heading"><div><h4>需要你确认的匹配</h4><p>系统无法确定两段是否属于同一项经历；确认后才会进入正式差异和 AI 分析。</p></div><span>{report.reviewItems.length}</span></div><div className="diff-list">{report.reviewItems.map((item) => <ReviewCard key={item.id} item={item} onChange={onUpdateReview} onResolve={onResolveReview} />)}</div></section>}{report.items.length === 0 && report.reviewItems.length === 0 ? <p className="quiet-box">没有识别到内容变化。</p> : <DiffGroups report={report} analyses={analysis?.items ?? []} focusedId={focusedChange} onMerge={onMergeChanges} onChange={onUpdateDiff} />}</div> : <div id="resume-panel-comparison" className="comparison-panel" role="tabpanel" aria-labelledby="resume-tab-comparison" tabIndex={0}>{report.algorithmVersion === 3 ? <><div className="annotated-toolbar"><div><strong>结构化版本对照</strong><span>默认展示当前版本；点击变化位置可返回详细清单</span></div><button onClick={() => setParentVisible((value) => !value)}>{parentVisible ? "收起父版本" : "显示父版本"}</button></div><AnnotatedComparison report={report} parentVisible={parentVisible} onFocus={focusChange} /></> : <StructuredResume sections={buildStructuredDocument(selectedResume.blocks)} />}</div>}
         </>}</div>
       </> : <div className="detail-placeholder">选择一份简历查看版本详情</div>}</section>
     </div>}
@@ -618,7 +618,47 @@ function AiSettingsModal({ settings, testing, onChange, onTest, onSave, onClear,
   return <Modal onClose={onClose} className="ai-settings-modal"><p className="eyebrow">PRIVATE AI CONNECTION</p><h2>AI API 设置</h2><p className="modal-note">API Key 不会写入网站代码或工作区备份。分析时，父子简历、已确认差异和当前 JD 会通过本站代理发送给你选择的 AI 服务商。</p><label className="field"><span>AI 服务商</span><select value={settings.provider} onChange={(event) => changeProvider(event.target.value as AiSettings["provider"])}>{AI_PROVIDERS.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><small>{provider.description}；切换服务商会清空当前 Key，避免误发。</small></label>{settings.provider === "custom" ? <Field label="Chat Completions API 地址" value={settings.endpoint} onChange={(endpoint) => onChange({ ...settings, endpoint })} placeholder="https://example.com/v1/chat/completions" /> : <div className="ai-endpoint"><span>请求接口</span><code>{provider.endpoint}</code></div>}<Field label="API Key" value={settings.apiKey} onChange={(apiKey) => onChange({ ...settings, apiKey })} type="password" placeholder="仅保存在当前浏览器" /><Field label="模型名称" value={settings.model} onChange={(model) => onChange({ ...settings, model })} placeholder={provider.defaultModel || "填写服务商提供的模型 ID"} /><div className="setting-check"><input id="ai-anonymize" aria-labelledby="ai-anonymize-label" type="checkbox" checked={settings.anonymize} onChange={(event) => onChange({ ...settings, anonymize: event.target.checked })} /><span><strong id="ai-anonymize-label">分析前隐藏常见联系方式</strong><small>自动替换邮箱和电话号码；公司、学校、姓名及经历内容仍会发送。</small></span></div><div className="setting-check"><input id="ai-remember" aria-labelledby="ai-remember-label" type="checkbox" checked={settings.remember} onChange={(event) => onChange({ ...settings, remember: event.target.checked })} /><span><strong id="ai-remember-label">在当前浏览器记住 API Key</strong><small>关闭后只保留到本次浏览器会话结束；完整备份始终不包含 Key。</small></span></div><div className="modal-actions ai-settings-actions">{settings.apiKey && <button className="danger-text" onClick={onClear}>清除 Key</button>}<button onClick={onTest} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button><button className="primary" onClick={onSave}>保存设置</button></div></Modal>;
 }
 
-function Modal({ children, onClose, className = "" }: { children: React.ReactNode; onClose: () => void; className?: string }) { return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className={`modal ${className}`} role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button>{children}</section></div>; }
+function Modal({ children, onClose, className = "" }: { children: React.ReactNode; onClose: () => void; className?: string }) {
+  const modalRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+  useEffect(() => {
+    const previousActive = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    const modal = modalRef.current;
+    const focusableSelector = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+    const focusables = () => Array.from(modal?.querySelectorAll<HTMLElement>(focusableSelector) ?? []);
+    closeButtonRef.current?.focus();
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousActive?.focus();
+    };
+  }, []);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section ref={modalRef} className={`modal ${className}`} role="dialog" aria-modal="true" aria-label="对话框"><button ref={closeButtonRef} className="modal-close" onClick={onClose} aria-label="关闭">×</button>{children}</section></div>;
+}
 function Field({ label, value, onChange, multiline = false, rows = 3, placeholder = "", type = "text" }: { label: string; value: string; onChange: (value: string) => void; multiline?: boolean; rows?: number; placeholder?: string; type?: string }) { return <label className="field"><span>{label}</span>{multiline ? <textarea value={value} rows={rows} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} /> : <input type={type} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />}</label>; }
 function Metric({ value, label }: { value: number; label: string }) { return <div className="metric"><strong>{value}</strong><span>{label}</span></div>; }
 function EmptyPanel({ title, text, action, onAction }: { title: string; text: string; action: string; onAction: () => void }) { return <div className="empty-panel"><div className="empty-orbit"><i /><i /><i /></div><h2>{title}</h2><p>{text}</p><button className="primary" onClick={onAction}>{action}</button></div>; }

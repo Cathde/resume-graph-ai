@@ -58,6 +58,9 @@ export default defineConfig(async () => {
       sites(),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
+        // The local preview does not use Wrangler's inspector proxy. Disabling
+        // it avoids an extra 9229 listener that can fail in restricted shells.
+        inspectorPort: false,
         config: localBindingConfig,
       }),
     ],
